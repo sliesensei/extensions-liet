@@ -8,54 +8,26 @@ import {
     MangaTile,
     MangaUpdates,
     PagedResults,
-    Request,
-    RequestInterceptor,
     Response,
     SearchRequest,
     Section,
     Source,
     SourceInfo,
-    SourceStateManager,
     TagSection,
     TagType,
 } from "paperback-extensions-common";
 
 import {parseLangCode} from "./Languages";
 
-import {resetSettingsButton, serverSettingsMenu, testServerSettingsMenu,} from "./Settings";
-
-import {
-    getAuthorizationString,
-    getKomgaAPI,
-    getOptions,
-    getServerUnavailableMangaTiles,
-    searchRequest,
-} from "./Common";
-
-// This source use Komga REST API
-// https://komga.org/guides/rest.html
-
-// Manga are represented by `series`
-// Chapters are represented by `books`
-
-// The Basic Authentication is handled by the interceptor
-
-// Code and method used by both the source and the tracker are defined in the duplicated `KomgaCommon.ts` file
-
-// Due to the self hosted nature of Komga, this source requires the user to enter its server credentials in the source settings menu
-// Some methods are known to throw errors without specific actions from the user. They try to prevent this behavior when server settings are not set.
-// This include:
-//  - homepage sections
-//  - getTags() which is called on the homepage
-//  - search method which is called even if the user search in an other source
+import {getKomgaAPI, getOptions, getServerUnavailableMangaTiles,} from "./Common";
 
 export const PaperbackInfo: SourceInfo = {
-    version: "1.2.10",
-    name: "Paperback",
+    version: "0.1",
+    name: "RaijinScans",
     icon: "icon.png",
-    author: "Lemon | Faizan Durrani",
-    authorWebsite: "https://github.com/FramboisePi",
-    description: "Komga client extension for Paperback",
+    author: "Lïet | Davy",
+    // authorWebsite: "https://github.com/FramboisePi",
+    description: "Raijin Scans extension for Paperback",
     contentRating: ContentRating.EVERYONE,
     websiteBaseURL: "https://komga.org",
     sourceTags: [
@@ -95,64 +67,12 @@ export const capitalize = (tag: string): string => {
     return tag.replace(/^\w/, (c) => c.toUpperCase());
 };
 
-export class KomgaRequestInterceptor implements RequestInterceptor {
-    /*
-        Requests made to Komga must use a Basic Authentication.
-        This interceptor adds an authorization header to the requests.
-
-        NOTE: The authorization header can be overridden by the request
-        */
-
-    stateManager: SourceStateManager;
-    constructor(stateManager: SourceStateManager) {
-        this.stateManager = stateManager;
-    }
-
-    async interceptResponse(response: Response): Promise<Response> {
-        return response;
-    }
-
-    async interceptRequest(request: Request): Promise<Request> {
-        // NOTE: Doing it like this will make downloads work tried every other method did not work, if there is a better method make edit it and make pull request
-
-        if(request.url.includes('intercept*')){
-            const url = request?.url?.split('*').pop() ?? ''
-            
-            request.headers = {
-                'authorization': await getAuthorizationString(this.stateManager)
-            }
-
-            request.url = url
-
-            return request
-        }
-
-        if (request.headers === undefined) {
-            request.headers = {};
-        }
-
-        // We mustn't call this.getAuthorizationString() for the stateful submission request.
-        // This procedure indeed catchs the request used to check user credentials
-        // which can happen before an authorizationString is saved,
-        // raising an error in getAuthorizationString when we check for its existence
-        // Thus we only inject an authorizationString if none are defined in the request
-        if (request.headers.authorization === undefined) {
-            request.headers.authorization = await getAuthorizationString(
-                this.stateManager
-            );
-        }
-
-        return request;
-    }
-}
-
 export class Paperback extends Source {
     stateManager = createSourceStateManager({});
 
     requestManager = createRequestManager({
         requestsPerSecond: 4,
         requestTimeout: 20000,
-        interceptor: new KomgaRequestInterceptor(this.stateManager),
     });
 
     override async getSourceMenu(): Promise<Section> {
@@ -160,229 +80,73 @@ export class Paperback extends Source {
             id: "main",
             header: "Source Settings",
             rows: async () => [
-                serverSettingsMenu(this.stateManager),
-                testServerSettingsMenu(this.stateManager, this.requestManager),
-                resetSettingsButton(this.stateManager),
+                // serverSettingsMenu(this.stateManager),
+                // testServerSettingsMenu(this.stateManager, this.requestManager),
+                // resetSettingsButton(this.stateManager),
             ],
         });
     }
 
     override async getTags(): Promise<TagSection[]> {
-        // This function is called on the homepage and should not throw if the server is unavailable
-
-        // We define four types of tags:
-        // - `genre`
-        // - `tag`
-        // - `collection`
-        // - `library`
-        // To be able to make the difference between theses types, we append `genre-` or `tag-` at the beginning of the tag id
-
-        let genresResponse: Response,
-            tagsResponse: Response,
-            collectionResponse: Response,
-            libraryResponse: Response;
-
-        // We try to make the requests. If this fail, we return a placeholder tags list to inform the user and prevent the function from throwing an error
-        try {
-            const komgaAPI = await getKomgaAPI(this.stateManager);
-
-            const genresRequest = createRequestObject({
-                url: `${komgaAPI}/genres`,
-                method: "GET",
-            });
-            genresResponse = await this.requestManager.schedule(genresRequest, 1);
-
-            const tagsRequest = createRequestObject({
-                url: `${komgaAPI}/tags/series`,
-                method: "GET",
-            });
-            tagsResponse = await this.requestManager.schedule(tagsRequest, 1);
-
-            const collectionRequest = createRequestObject({
-                url: `${komgaAPI}/collections`,
-                method: "GET",
-            });
-            collectionResponse = await this.requestManager.schedule(collectionRequest, 1);
-
-            const libraryRequest = createRequestObject({
-                url: `${komgaAPI}/libraries`,
-                method: "GET",
-            });
-            libraryResponse = await this.requestManager.schedule(libraryRequest, 1);
-        } catch (error) {
-            console.log(`getTags failed with error: ${error}`);
-            return [
-                createTagSection({ id: "-1", label: "Server unavailable", tags: [] }),
-            ];
-        }
-
-        // The following part of the function should throw if there is an error and thus is not in the try/catch block
-
-        const genresResult =
-            typeof genresResponse.data === "string"
-                ? JSON.parse(genresResponse.data)
-                : genresResponse.data;
-
-        const tagsResult =
-            typeof tagsResponse.data === "string"
-                ? JSON.parse(tagsResponse.data)
-                : tagsResponse.data;
-
-        const collectionResult =
-            typeof collectionResponse.data === "string"
-                ? JSON.parse(collectionResponse.data)
-                : collectionResponse.data;
-
-        const libraryResult =
-            typeof libraryResponse.data === "string"
-                ? JSON.parse(libraryResponse.data)
-                : libraryResponse.data;
-
-        const tagSections: [TagSection, TagSection, TagSection, TagSection] = [
-            createTagSection({ id: "0", label: "genres", tags: [] }),
-            createTagSection({ id: "1", label: "tags", tags: [] }),
-            createTagSection({ id: "2", label: "collections", tags: [] }),
-            createTagSection({ id: "3", label: "libraries", tags: [] }),
-        ];
-
-        // For each tag, we append a type identifier to its id and capitalize its label
-        tagSections[0].tags = genresResult.map((elem: string) =>
-            createTag({ id: "genre-" + elem, label: capitalize(elem) })
-        );
-        tagSections[1].tags = tagsResult.map((elem: string) =>
-            createTag({ id: "tag-" + elem, label: capitalize(elem) })
-        );
-        tagSections[2].tags = collectionResult.content.map((elem: { name: string; id: string; }) =>
-            createTag({id: "collection-" + elem.id, label: capitalize(elem.name)})
-        );
-        tagSections[3].tags = libraryResult.map((elem: { name: string; id: string; }) =>
-            createTag({ id: "library-" + elem.id, label: capitalize(elem.name) })
-        );
-
-        if (collectionResult.content.length <= 1) {
-            tagSections.splice(2, 1);
-        }
-
-        return tagSections;
+        return [];
     }
 
     async getMangaDetails(mangaId: string): Promise<Manga> {
-        /*
-                In Komga a manga is represented by a `serie`
-                */
-        const komgaAPI = await getKomgaAPI(this.stateManager);
-
         const request = createRequestObject({
-            url: `${komgaAPI}/series/${mangaId}`,
+            url: `https://raijinscans.fr/manga/${mangaId}`,
             method: "GET",
         });
-
         const response = await this.requestManager.schedule(request, 1);
-        const result =
-            typeof response.data === "string"
-                ? JSON.parse(response.data)
-                : response.data;
-
-        const metadata = result.metadata;
-        const booksMetadata = result.booksMetadata;
-
-        const tagSections: [TagSection, TagSection] = [
-            createTagSection({ id: "0", label: "genres", tags: [] }),
-            createTagSection({ id: "1", label: "tags", tags: [] }),
-        ];
-        // For each tag, we append a type identifier to its id and capitalize its label
-        tagSections[0].tags = metadata.genres.map((elem: string) =>
-            createTag({ id: "genre-" + elem, label: capitalize(elem) })
-        );
-        tagSections[1].tags = metadata.tags.map((elem: string) =>
-            createTag({ id: "tag-" + elem, label: capitalize(elem) })
-        );
-
-        const authors: string[] = [];
-        const artists: string[] = [];
-
-        // Additional roles: colorist, inker, letterer, cover, editor
-        for (const entry of booksMetadata.authors) {
-            if (entry.role === "writer") {
-                authors.push(entry.name);
-            }
-            if (entry.role === "penciller") {
-                artists.push(entry.name);
-            }
-        }
+        const $ = this.cheerio.load(response.data)
+        const title: string = $('h1').text() || ''
+        const imageUrl: string = $('.summary_image img').attr('data-src') || ''
 
         return createManga({
             id: mangaId,
-            titles: [metadata.title],
-            image: `${komgaAPI}/series/${mangaId}/thumbnail`,
-            status: parseMangaStatus(metadata.status),
-            langFlag: metadata.language,
+            titles: [title],
+            image: imageUrl,
+            status: MangaStatus.COMPLETED,
+            // langFlag: metadata.language,
             // Unused: langName
 
-            artist: artists.join(", "),
-            author: authors.join(", "),
+            // artist: artists.join(", "),
+            // author: authors.join(", "),
 
-            desc: metadata.summary ? metadata.summary : booksMetadata.summary,
-            tags: tagSections,
-            lastUpdate: metadata.lastModified,
+            // desc: metadata.summary ? metadata.summary : booksMetadata.summary,
+            // tags: tagSections,
+            // lastUpdate: metadata.lastModified,
         });
     }
 
     async getChapters(mangaId: string): Promise<Chapter[]> {
-        /*
-                In Komga a chapter is a `book`
-                */
-
-        const komgaAPI = await getKomgaAPI(this.stateManager);
-
-        const booksRequest = createRequestObject({
-            url: `${komgaAPI}/series/${mangaId}/books`,
-            param: "?unpaged=true&media_status=READY&deleted=false",
+        const request = createRequestObject({
+            url: `https://raijinscans.fr/manga/${mangaId}`,
             method: "GET",
         });
+        const response = await this.requestManager.schedule(request, 1);
+        const $ = this.cheerio.load(response.data)
+        const domArray = $('.listing-chapters_wrap .wp-manga-chapter').toArray()
+        const chapters = []
+        let i = 0
 
-        const booksResponse = await this.requestManager.schedule(booksRequest, 1);
-        const booksResult =
-            typeof booksResponse.data === "string"
-                ? JSON.parse(booksResponse.data)
-                : booksResponse.data;
-
-        const chapters: Chapter[] = [];
-
-        // Chapters language is only available on the serie page
-        const serieRequest = createRequestObject({
-            url: `${komgaAPI}/series/${mangaId}`,
-            method: "GET",
-        });
-        const serieResponse = await this.requestManager.schedule(serieRequest, 1);
-        const serieResult =
-            typeof serieResponse.data === "string"
-                ? JSON.parse(serieResponse.data)
-                : serieResponse.data;
-        const languageCode = parseLangCode(serieResult.metadata.language);
-
-        for (const book of booksResult.content) {
+        for (const obj of domArray) {
             chapters.push(
                 createChapter({
-                    id: book.id,
+                    id: `${domArray.length - i}`,
                     mangaId: mangaId,
-                    chapNum: parseFloat(book.metadata.number),
-                    langCode: languageCode,
-                    name: `${book.metadata.title} (${book.size})`,
-                    time: new Date(book.fileLastModified),
+                    chapNum: domArray.length - i,
+                    name: `Ch. ${domArray.length - i}`,
                     // @ts-ignore
-                    sortingIndex: book.metadata.numberSort
+                    sortingIndex: domArray.length - i
                 })
             );
+            i++
         }
 
         return chapters;
     }
 
-    async getChapterDetails(
-        mangaId: string,
-        chapterId: string
-    ): Promise<ChapterDetails> {
+    async getChapterDetails(mangaId: string, chapterId: string): Promise<ChapterDetails> {
         const komgaAPI = await getKomgaAPI(this.stateManager);
 
         const request = createRequestObject({
@@ -432,24 +196,57 @@ export class Paperback extends Source {
         });
     }
 
-    override async getSearchResults(
-        searchQuery: SearchRequest,
-        metadata: any
-    ): Promise<PagedResults> {
-        // This function is also called when the user search in an other source. It should not throw if the server is unavailable.
+    override async getSearchResults(searchQuery: SearchRequest, metadata: any): Promise<PagedResults> {
+        const page: number = metadata?.page ?? 0;
+        let searchString: string = encodeURIComponent(searchQuery.title ?? "");
 
-        return searchRequest(
-            searchQuery,
-            metadata,
-            this.requestManager,
-            this.stateManager,
-            PAGE_SIZE
-        );
+        const request = createRequestObject({
+            url: `https://raijinscans.fr/`,
+            method: "GET",
+            param: `?s=${searchString}&post_type=wp-manga`,
+        });
+
+        // We don't want to throw if the server is unavailable
+        let data: Response;
+        try {
+            data = await this.requestManager.schedule(request, 1);
+        } catch (error) {
+            console.log(`searchRequest failed with error: ${error}`);
+            return createPagedResults({results: getServerUnavailableMangaTiles()});
+        }
+
+        const tiles = [];
+        const $ = this.cheerio.load(data.data)
+        const domArray = $('.search-wrap .c-tabs-item > .c-tabs-item__content').toArray()
+
+        for(let obj of domArray) {
+            let idString = $('.tab-summary .post-title a', $(obj)).attr('href');
+            let idArr = idString?.split('/')
+            let id: string | undefined;
+            if (idString?.endsWith('/')) {
+                idArr?.pop()
+                id = idArr?.pop()
+            } else {
+                id = idArr?.pop()
+            }
+
+            tiles.push(
+                createMangaTile({
+                    id: id || '',
+                    title: createIconText({ text: $('.tab-summary .post-title a', $(obj)).text() || '' }),
+                    image: $('.tab-thumb img', $(obj)).attr('data-src') || '',
+                })
+            );
+        }
+
+        // metadata = tiles.length === 0 ? undefined : { page: page + 1 };
+        return createPagedResults({
+            results: tiles,
+            metadata: undefined,
+        });
     }
 
-    override async getHomePageSections(
-        sectionCallback: (section: HomeSection) => void
-    ): Promise<void> {
+    override async getHomePageSections(sectionCallback: (section: HomeSection) => void): Promise<void> {
         // This function is called on the homepage and should not throw if the server is unavailable
 
         // We won't use `await this.getKomgaAPI()` as we do not want to throw an error on
@@ -561,10 +358,7 @@ export class Paperback extends Source {
         await Promise.all(promises);
     }
 
-    override async getViewMoreItems(
-        homepageSectionId: string,
-        metadata: any
-    ): Promise<PagedResults> {
+    override async getViewMoreItems(homepageSectionId: string, metadata: any): Promise<PagedResults> {
         const komgaAPI = await getKomgaAPI(this.stateManager);
         const page: number = metadata?.page ?? 0;
 
@@ -598,11 +392,7 @@ export class Paperback extends Source {
         });
     }
 
-    override async filterUpdatedManga(
-        mangaUpdatesFoundCallback: (updates: MangaUpdates) => void,
-        time: Date,
-        ids: string[]
-    ): Promise<void> {
+    override async filterUpdatedManga(mangaUpdatesFoundCallback: (updates: MangaUpdates) => void, time: Date, ids: string[]): Promise<void> {
         const komgaAPI = await getKomgaAPI(this.stateManager);
 
         // We make requests of PAGE_SIZE titles to `series/updated/` until we got every titles
